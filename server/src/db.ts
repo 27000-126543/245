@@ -1,4 +1,3 @@
-import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dayjs from 'dayjs';
@@ -6,198 +5,358 @@ import dayjs from 'dayjs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const dbPath = path.join(__dirname, '../../court-system.db');
-const db = new Database(dbPath);
+let db: any;
+let useMemory = false;
 
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const memoryData: Record<string, any[]> = {};
+
+function initMemoryDB() {
+  console.log('⚠️  better-sqlite3不可用，使用内存数据库模式');
+  console.log('⚠️  注意：内存模式下数据不会持久化，重启后丢失');
+  
+  const tables = [
+    'departments', 'users', 'court_rooms', 'cases', 'documents',
+    'service_records', 'schedules', 'trial_records', 'execution_records',
+    'property_controls', 'execution_distributions', 'notifications'
+  ];
+  
+  tables.forEach(table => {
+    memoryData[table] = [];
+  });
+  
+  useMemory = true;
+}
+
+try {
+  const Database = (await import('better-sqlite3')).default;
+  const dbPath = path.join(__dirname, '../../court-system.db');
+  db = new Database(dbPath);
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  console.log('✅ 使用SQLite数据库模式');
+} catch (error: any) {
+  console.log('ℹ️  better-sqlite3加载失败:', error.message);
+  initMemoryDB();
+}
+
+function prepare(query: string): any {
+  if (useMemory) {
+    return {
+      all: (...params: any[]) => {
+        const tableMatch = query.match(/FROM\s+(\w+)/i);
+        const table = tableMatch ? tableMatch[1] : '';
+        let results = memoryData[table] || [];
+        
+        const whereMatch = query.match(/WHERE\s+(.+?)(?:ORDER|LIMIT|$)/i);
+        if (whereMatch) {
+          results = results.filter(item => {
+            let valid = true;
+            const conditions = whereMatch[1].split(/\s+AND\s+/i);
+            conditions.forEach((cond: string, idx: number) => {
+              if (cond.includes('LIKE')) {
+                const [field] = cond.split(' LIKE ');
+                const value = params[idx];
+                const pattern = value.replace(/%/g, '');
+                valid = valid && item[field.trim()]?.includes(pattern.replace(/'/g, ''));
+              } else if (cond.includes('=')) {
+                const [field] = cond.split('=');
+                const value = params[idx];
+                if (value != null && field && field.trim() && !field.includes('?')) {
+                  valid = valid && item[field.trim()] === value;
+                }
+              }
+            });
+            return valid;
+          });
+        }
+        
+        const limitMatch = query.match(/LIMIT\s+(\d+)/i);
+        const offsetMatch = query.match(/OFFSET\s+(\d+)/i);
+        if (limitMatch) {
+          const limit = parseInt(limitMatch[1]);
+          const offset = offsetMatch ? parseInt(offsetMatch[1]) : 0;
+          results = results.slice(offset, offset + limit);
+        }
+        
+        return results;
+      },
+      get: (...params: any[]) => {
+        const all = prepare(query).all(...params);
+        return all[0];
+      },
+      run: (...params: any[]) => {
+        if (query.trim().toUpperCase().startsWith('INSERT')) {
+          const tableMatch = query.match(/INTO\s+(\w+)/i);
+          const table = tableMatch ? tableMatch[1] : '';
+          const valuesMatch = query.match(/VALUES\s*\((.+?)\)/i);
+          if (valuesMatch && table) {
+            const fieldsMatch = query.match(/\((.+?)\)\s*VALUES/i);
+            const fields = fieldsMatch ? fieldsMatch[1].split(',').map((f: string) => f.trim()) : [];
+            const newItem: any = {};
+            fields.forEach((field: string, idx: number) => {
+              newItem[field] = params[idx];
+            });
+            memoryData[table].push(newItem);
+          }
+          return { changes: 1 };
+        } else if (query.trim().toUpperCase().startsWith('UPDATE')) {
+          const tableMatch = query.match(/UPDATE\s+(\w+)/i);
+          const table = tableMatch ? tableMatch[1] : '';
+          const setMatch = query.match(/SET\s+(.+?)\s+WHERE/i);
+          const whereMatch = query.match(/WHERE\s+(.+)$/i);
+          if (setMatch && table) {
+            const updates = setMatch[1].split(',').map((s: string) => s.trim().split('=')[0].trim());
+            memoryData[table].forEach((item, idx) => {
+              if (whereMatch) {
+                const cond = whereMatch[1];
+                if (cond.includes('=')) {
+                  const [field] = cond.split('=');
+                  if (item[field.trim()] === params[params.length - 1]) {
+                    updates.forEach((u: string, i: number) => {
+                      item[u] = params[i];
+                    });
+                  }
+                }
+              }
+            });
+          }
+          return { changes: 1 };
+        } else if (query.trim().toUpperCase().startsWith('DELETE')) {
+          const tableMatch = query.match(/FROM\s+(\w+)/i);
+          const table = tableMatch ? tableMatch[1] : '';
+          const whereMatch = query.match(/WHERE\s+(.+)$/i);
+          if (table && whereMatch) {
+            const cond = whereMatch[1];
+            if (cond.includes('=')) {
+              const [field] = cond.split('=');
+              memoryData[table] = memoryData[table].filter(
+                item => item[field.trim()] !== params[params.length - 1]
+              );
+            }
+          }
+          return { changes: 1 };
+        }
+        return { changes: 0 };
+      }
+    };
+  }
+  return db.prepare(query);
+}
+
+function exec(query: string) {
+  if (useMemory) {
+    const statements = query.split(';').filter(s => s.trim());
+    statements.forEach(stmt => {
+      if (stmt.trim().toUpperCase().startsWith('CREATE TABLE')) {
+        const tableMatch = stmt.match(/CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(\w+)/i);
+        if (tableMatch && !memoryData[tableMatch[1]]) {
+          memoryData[tableMatch[1]] = [];
+        }
+      }
+    });
+    return;
+  }
+  return db.exec(query);
+}
+
+const database = {
+  prepare,
+  exec,
+  pragma: () => {},
+};
 
 export function initDatabase() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS departments (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      code TEXT NOT NULL
-    );
+  if (useMemory) {
+    const tables = [
+      'departments', 'users', 'court_rooms', 'cases', 'documents',
+      'service_records', 'schedules', 'trial_records', 'execution_records',
+      'property_controls', 'execution_distributions', 'notifications'
+    ];
+    tables.forEach(table => {
+      if (!memoryData[table]) memoryData[table] = [];
+    });
+    console.log('✅ 内存数据库表结构初始化完成');
+  } else {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS departments (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        code TEXT NOT NULL
+      );
 
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      username TEXT UNIQUE NOT NULL,
-      name TEXT NOT NULL,
-      role TEXT NOT NULL,
-      department TEXT NOT NULL,
-      phone TEXT,
-      email TEXT,
-      password TEXT NOT NULL DEFAULT '123456'
-    );
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        department TEXT NOT NULL,
+        phone TEXT,
+        email TEXT,
+        password TEXT NOT NULL DEFAULT '123456'
+      );
 
-    CREATE TABLE IF NOT EXISTS court_rooms (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      location TEXT NOT NULL,
-      capacity INTEGER NOT NULL,
-      equipment TEXT NOT NULL
-    );
+      CREATE TABLE IF NOT EXISTS court_rooms (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        location TEXT NOT NULL,
+        capacity INTEGER NOT NULL,
+        equipment TEXT NOT NULL
+      );
 
-    CREATE TABLE IF NOT EXISTS cases (
-      id TEXT PRIMARY KEY,
-      caseNumber TEXT UNIQUE NOT NULL,
-      caseType TEXT NOT NULL,
-      causeOfAction TEXT NOT NULL,
-      plaintiff TEXT NOT NULL,
-      defendant TEXT NOT NULL,
-      plaintiffPhone TEXT,
-      defendantPhone TEXT,
-      plaintiffAddress TEXT,
-      defendantAddress TEXT,
-      status TEXT NOT NULL DEFAULT 'filed',
-      judgeId TEXT,
-      judgeName TEXT,
-      clerkId TEXT,
-      clerkName TEXT,
-      departmentId TEXT,
-      departmentName TEXT,
-      estimatedDays INTEGER NOT NULL DEFAULT 60,
-      actualDays INTEGER,
-      createdAt TEXT NOT NULL,
-      deadline TEXT NOT NULL,
-      filingMaterials TEXT,
-      description TEXT,
-      amount REAL
-    );
+      CREATE TABLE IF NOT EXISTS cases (
+        id TEXT PRIMARY KEY,
+        caseNumber TEXT UNIQUE NOT NULL,
+        caseType TEXT NOT NULL,
+        causeOfAction TEXT NOT NULL,
+        plaintiff TEXT NOT NULL,
+        defendant TEXT NOT NULL,
+        plaintiffPhone TEXT,
+        defendantPhone TEXT,
+        plaintiffAddress TEXT,
+        defendantAddress TEXT,
+        status TEXT NOT NULL DEFAULT 'filed',
+        judgeId TEXT,
+        judgeName TEXT,
+        clerkId TEXT,
+        clerkName TEXT,
+        departmentId TEXT,
+        departmentName TEXT,
+        estimatedDays INTEGER NOT NULL DEFAULT 60,
+        actualDays INTEGER,
+        createdAt TEXT NOT NULL,
+        deadline TEXT NOT NULL,
+        filingMaterials TEXT,
+        description TEXT,
+        amount REAL
+      );
 
-    CREATE TABLE IF NOT EXISTS documents (
-      id TEXT PRIMARY KEY,
-      caseId TEXT NOT NULL,
-      caseNumber TEXT NOT NULL,
-      type TEXT NOT NULL,
-      title TEXT NOT NULL,
-      content TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'draft',
-      approverLevel INTEGER NOT NULL DEFAULT 0,
-      currentApproverId TEXT,
-      currentApproverName TEXT,
-      approvals TEXT NOT NULL DEFAULT '[]',
-      authorId TEXT NOT NULL,
-      authorName TEXT NOT NULL,
-      createdAt TEXT NOT NULL,
-      submittedAt TEXT,
-      approvedAt TEXT,
-      suggestedPoints TEXT
-    );
+      CREATE TABLE IF NOT EXISTS documents (
+        id TEXT PRIMARY KEY,
+        caseId TEXT NOT NULL,
+        caseNumber TEXT NOT NULL,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        approverLevel INTEGER NOT NULL DEFAULT 0,
+        currentApproverId TEXT,
+        currentApproverName TEXT,
+        approvals TEXT NOT NULL DEFAULT '[]',
+        authorId TEXT NOT NULL,
+        authorName TEXT NOT NULL,
+        createdAt TEXT NOT NULL,
+        submittedAt TEXT,
+        approvedAt TEXT,
+        suggestedPoints TEXT
+      );
 
-    CREATE TABLE IF NOT EXISTS service_records (
-      id TEXT PRIMARY KEY,
-      caseId TEXT NOT NULL,
-      caseNumber TEXT NOT NULL,
-      method TEXT NOT NULL,
-      receiver TEXT NOT NULL,
-      receiverPhone TEXT,
-      receiverEmail TEXT,
-      documentType TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'sending',
-      receiptUrl TEXT,
-      sentAt TEXT NOT NULL,
-      deliveredAt TEXT,
-      createdAt TEXT NOT NULL
-    );
+      CREATE TABLE IF NOT EXISTS service_records (
+        id TEXT PRIMARY KEY,
+        caseId TEXT NOT NULL,
+        caseNumber TEXT NOT NULL,
+        method TEXT NOT NULL,
+        receiver TEXT NOT NULL,
+        receiverPhone TEXT,
+        receiverEmail TEXT,
+        documentType TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'sending',
+        receiptUrl TEXT,
+        sentAt TEXT NOT NULL,
+        deliveredAt TEXT,
+        createdAt TEXT NOT NULL
+      );
 
-    CREATE TABLE IF NOT EXISTS schedules (
-      id TEXT PRIMARY KEY,
-      caseId TEXT NOT NULL,
-      caseNumber TEXT NOT NULL,
-      caseName TEXT NOT NULL,
-      judgeId TEXT NOT NULL,
-      judgeName TEXT NOT NULL,
-      courtRoomId TEXT NOT NULL,
-      courtRoomName TEXT NOT NULL,
-      date TEXT NOT NULL,
-      startTime TEXT NOT NULL,
-      endTime TEXT NOT NULL,
-      type TEXT NOT NULL DEFAULT 'trial',
-      status TEXT NOT NULL DEFAULT 'scheduled',
-      createdAt TEXT NOT NULL,
-      queuePosition INTEGER
-    );
+      CREATE TABLE IF NOT EXISTS schedules (
+        id TEXT PRIMARY KEY,
+        caseId TEXT NOT NULL,
+        caseNumber TEXT NOT NULL,
+        caseName TEXT NOT NULL,
+        judgeId TEXT NOT NULL,
+        judgeName TEXT NOT NULL,
+        courtRoomId TEXT NOT NULL,
+        courtRoomName TEXT NOT NULL,
+        date TEXT NOT NULL,
+        startTime TEXT NOT NULL,
+        endTime TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'trial',
+        status TEXT NOT NULL DEFAULT 'scheduled',
+        createdAt TEXT NOT NULL,
+        queuePosition INTEGER
+      );
 
-    CREATE TABLE IF NOT EXISTS trial_records (
-      id TEXT PRIMARY KEY,
-      caseId TEXT NOT NULL,
-      caseNumber TEXT NOT NULL,
-      caseName TEXT NOT NULL,
-      scheduleId TEXT,
-      judgeName TEXT NOT NULL,
-      courtRoomName TEXT NOT NULL,
-      startTime TEXT NOT NULL,
-      endTime TEXT,
-      duration INTEGER,
-      videoUrl TEXT,
-      transcript TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      participants TEXT,
-      createdAt TEXT NOT NULL
-    );
+      CREATE TABLE IF NOT EXISTS trial_records (
+        id TEXT PRIMARY KEY,
+        caseId TEXT NOT NULL,
+        caseNumber TEXT NOT NULL,
+        caseName TEXT NOT NULL,
+        scheduleId TEXT,
+        judgeName TEXT NOT NULL,
+        courtRoomName TEXT NOT NULL,
+        startTime TEXT NOT NULL,
+        endTime TEXT,
+        duration INTEGER,
+        videoUrl TEXT,
+        transcript TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        participants TEXT,
+        createdAt TEXT NOT NULL
+      );
 
-    CREATE TABLE IF NOT EXISTS execution_records (
-      id TEXT PRIMARY KEY,
-      caseId TEXT NOT NULL,
-      caseNumber TEXT NOT NULL,
-      applicant TEXT NOT NULL,
-      respondent TEXT NOT NULL,
-      amount REAL NOT NULL DEFAULT 0,
-      recoveredAmount REAL NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'pending',
-      createdAt TEXT NOT NULL
-    );
+      CREATE TABLE IF NOT EXISTS execution_records (
+        id TEXT PRIMARY KEY,
+        caseId TEXT NOT NULL,
+        caseNumber TEXT NOT NULL,
+        applicant TEXT NOT NULL,
+        respondent TEXT NOT NULL,
+        amount REAL NOT NULL DEFAULT 0,
+        recoveredAmount REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        createdAt TEXT NOT NULL
+      );
 
-    CREATE TABLE IF NOT EXISTS property_controls (
-      id TEXT PRIMARY KEY,
-      executionId TEXT NOT NULL,
-      type TEXT NOT NULL,
-      description TEXT NOT NULL,
-      amount REAL NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'frozen',
-      createdAt TEXT NOT NULL,
-      FOREIGN KEY (executionId) REFERENCES execution_records(id) ON DELETE CASCADE
-    );
+      CREATE TABLE IF NOT EXISTS property_controls (
+        id TEXT PRIMARY KEY,
+        executionId TEXT NOT NULL,
+        type TEXT NOT NULL,
+        description TEXT NOT NULL,
+        amount REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'frozen',
+        createdAt TEXT NOT NULL
+      );
 
-    CREATE TABLE IF NOT EXISTS execution_distributions (
-      id TEXT PRIMARY KEY,
-      executionId TEXT NOT NULL,
-      recipient TEXT NOT NULL,
-      amount REAL NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'pending',
-      paidAt TEXT,
-      remark TEXT,
-      createdAt TEXT NOT NULL,
-      FOREIGN KEY (executionId) REFERENCES execution_records(id) ON DELETE CASCADE
-    );
+      CREATE TABLE IF NOT EXISTS execution_distributions (
+        id TEXT PRIMARY KEY,
+        executionId TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        amount REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        paidAt TEXT,
+        remark TEXT,
+        createdAt TEXT NOT NULL
+      );
 
-    CREATE TABLE IF NOT EXISTS notifications (
-      id TEXT PRIMARY KEY,
-      type TEXT NOT NULL DEFAULT 'info',
-      title TEXT NOT NULL,
-      message TEXT NOT NULL,
-      read INTEGER NOT NULL DEFAULT 0,
-      createdAt TEXT NOT NULL,
-      userId TEXT
-    );
-  `);
-
-  console.log('✅ 数据库表结构初始化完成');
+      CREATE TABLE IF NOT EXISTS notifications (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL DEFAULT 'info',
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        read INTEGER NOT NULL DEFAULT 0,
+        createdAt TEXT NOT NULL,
+        userId TEXT
+      );
+    `);
+    console.log('✅ SQLite数据库表结构初始化完成');
+  }
 }
 
 export function seedData() {
-  const deptCount = db.prepare('SELECT COUNT(*) as count FROM departments').get() as { count: number };
-  if (deptCount.count > 0) {
+  const deptCount = prepare('SELECT COUNT(*) as count FROM departments').get();
+  if (deptCount && deptCount.count > 0) {
     console.log('ℹ️  种子数据已存在，跳过插入');
     return;
   }
 
-  const insertDept = db.prepare(`
-    INSERT INTO departments (id, name, code) VALUES (?, ?, ?)
-  `);
-
+  const insertDept = prepare('INSERT INTO departments (id, name, code) VALUES (?, ?, ?)');
   const departments = [
     { id: '1', name: '民事审判第一庭', code: 'MS1' },
     { id: '2', name: '民事审判第二庭', code: 'MS2' },
@@ -209,7 +368,7 @@ export function seedData() {
   departments.forEach(d => insertDept.run(d.id, d.name, d.code));
   console.log('✅ 庭室数据插入完成');
 
-  const insertUser = db.prepare(`
+  const insertUser = prepare(`
     INSERT INTO users (id, username, name, role, department, phone, email, password)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
@@ -230,7 +389,7 @@ export function seedData() {
   users.forEach(u => insertUser.run(u.id, u.username, u.name, u.role, u.department, u.phone, u.email, u.password));
   console.log('✅ 用户数据插入完成');
 
-  const insertCourtRoom = db.prepare(`
+  const insertCourtRoom = prepare(`
     INSERT INTO court_rooms (id, name, location, capacity, equipment)
     VALUES (?, ?, ?, ?, ?)
   `);
@@ -246,7 +405,7 @@ export function seedData() {
   courtRooms.forEach(c => insertCourtRoom.run(c.id, c.name, c.location, c.capacity, c.equipment));
   console.log('✅ 法庭数据插入完成');
 
-  const insertCase = db.prepare(`
+  const insertCase = prepare(`
     INSERT INTO cases (id, caseNumber, caseType, causeOfAction, plaintiff, defendant, 
       plaintiffPhone, defendantPhone, plaintiffAddress, defendantAddress, status,
       judgeId, judgeName, clerkId, clerkName, departmentId, departmentName,
@@ -306,7 +465,7 @@ export function seedData() {
   }
   console.log('✅ 55条案件数据插入完成');
 
-  const insertDoc = db.prepare(`
+  const insertDoc = prepare(`
     INSERT INTO documents (id, caseId, caseNumber, type, title, content, status,
       approverLevel, currentApproverId, currentApproverName, approvals,
       authorId, authorName, createdAt, submittedAt, suggestedPoints)
@@ -366,7 +525,7 @@ export function seedData() {
   ));
   console.log('✅ 文书数据插入完成');
 
-  const insertService = db.prepare(`
+  const insertService = prepare(`
     INSERT INTO service_records (id, caseId, caseNumber, method, receiver, receiverPhone,
       receiverEmail, documentType, status, sentAt, deliveredAt, createdAt)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -411,7 +570,7 @@ export function seedData() {
   console.log('✅ 送达记录插入完成');
 
   const today = dayjs();
-  const insertSchedule = db.prepare(`
+  const insertSchedule = prepare(`
     INSERT INTO schedules (id, caseId, caseNumber, caseName, judgeId, judgeName,
       courtRoomId, courtRoomName, date, startTime, endTime, type, status, createdAt)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -460,7 +619,7 @@ export function seedData() {
   ));
   console.log('✅ 排期数据插入完成');
 
-  const insertTrial = db.prepare(`
+  const insertTrial = prepare(`
     INSERT INTO trial_records (id, caseId, caseNumber, caseName, scheduleId, judgeName,
       courtRoomName, startTime, endTime, duration, videoUrl, transcript, status, participants, createdAt)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -482,7 +641,7 @@ export function seedData() {
   );
   console.log('✅ 庭审记录插入完成');
 
-  const insertExecution = db.prepare(`
+  const insertExecution = prepare(`
     INSERT INTO execution_records (id, caseId, caseNumber, applicant, respondent, amount,
       recoveredAmount, status, createdAt)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -519,7 +678,7 @@ export function seedData() {
     e.amount, e.recoveredAmount, e.status, e.createdAt
   ));
 
-  const insertPropertyControl = db.prepare(`
+  const insertPropertyControl = prepare(`
     INSERT INTO property_controls (id, executionId, type, description, amount, status, createdAt)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
@@ -535,7 +694,7 @@ export function seedData() {
     p.id, p.executionId, p.type, p.description, p.amount, p.status, p.createdAt
   ));
 
-  const insertDistribution = db.prepare(`
+  const insertDistribution = prepare(`
     INSERT INTO execution_distributions (id, executionId, recipient, amount, status, paidAt, remark, createdAt)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
@@ -549,7 +708,7 @@ export function seedData() {
   );
   console.log('✅ 执行数据插入完成');
 
-  const insertNotification = db.prepare(`
+  const insertNotification = prepare(`
     INSERT INTO notifications (id, type, title, message, read, createdAt, userId)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
@@ -581,4 +740,4 @@ export function seedData() {
   console.log('   - 通知：5条');
 }
 
-export default db;
+export default database;
