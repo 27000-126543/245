@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { User, Case, Document, ServiceRecord, Schedule, TrialRecord, ExecutionRecord, StatsData, Notification } from '../types';
 import { users, cases as mockCases, documents as mockDocuments, serviceRecords as mockServiceRecords, schedules as mockSchedules, trialRecords as mockTrialRecords, executionRecords as mockExecutionRecords, statsData as mockStatsData, notifications as mockNotifications } from '../data/mockData';
+import { api } from '../services/api';
 
 interface AppState {
   currentUser: User | null;
@@ -32,7 +33,8 @@ interface AppState {
   updateExecutionRecord: (id: string, recordData: Partial<ExecutionRecord>) => void;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
-  refreshStats: () => void;
+  refreshStats: () => Promise<void>;
+  loadAllData: () => Promise<void>;
 }
 
 export const useStore = create<AppState>()(
@@ -52,12 +54,14 @@ export const useStore = create<AppState>()(
       darkMode: true,
 
       login: async (username: string, password: string) => {
-        const user = get().users.find(u => u.username === username);
-        if (user && password === '123456') {
-          set({ currentUser: user });
+        try {
+          const result = await api.auth.login(username, password);
+          set({ currentUser: result.user });
           return true;
+        } catch (e) {
+          console.error('Login failed:', e);
+          return false;
         }
-        return false;
       },
 
       logout: () => {
@@ -70,6 +74,41 @@ export const useStore = create<AppState>()(
 
       toggleDarkMode: () => {
         set(state => ({ darkMode: !state.darkMode }));
+      },
+
+      loadAllData: async () => {
+        try {
+          const [cases, documents, serviceRecords, schedules, trials, executions, users, stats] = await Promise.all([
+            api.cases.list(),
+            api.documents.list(),
+            api.service.list(),
+            api.schedules.list(),
+            api.trials.list(),
+            api.executions.list(),
+            api.auth.getUsers(),
+            api.stats.overview(),
+          ]);
+          
+          set({
+            cases,
+            documents: documents.map((d: any) => ({
+              ...d,
+              approvals: typeof d.approvals === 'string' ? JSON.parse(d.approvals) : d.approvals,
+              suggestedPoints: typeof d.suggestedPoints === 'string' ? JSON.parse(d.suggestedPoints || '[]') : d.suggestedPoints,
+            })),
+            serviceRecords,
+            schedules,
+            trialRecords: trials.map((t: any) => ({
+              ...t,
+              participants: typeof t.participants === 'string' ? JSON.parse(t.participants || '[]') : t.participants,
+            })),
+            executionRecords: executions,
+            users,
+            statsData: stats,
+          });
+        } catch (e) {
+          console.error('Load data failed:', e);
+        }
       },
 
       addCase: (caseData) => {
@@ -85,7 +124,7 @@ export const useStore = create<AppState>()(
           createdAt: new Date().toISOString().split('T')[0],
           deadline: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
           ...caseData,
-        };
+        } as Case;
         set(state => ({ cases: [newCase, ...state.cases] }));
       },
 
@@ -110,7 +149,7 @@ export const useStore = create<AppState>()(
           createdAt: new Date().toISOString().split('T')[0],
           approvals: [],
           ...doc,
-        };
+        } as Document;
         set(state => ({ documents: [newDoc, ...state.documents] }));
       },
 
@@ -132,7 +171,7 @@ export const useStore = create<AppState>()(
           sentAt: new Date().toISOString(),
           createdAt: new Date().toISOString().split('T')[0],
           ...record,
-        };
+        } as ServiceRecord;
         set(state => ({ serviceRecords: [newRecord, ...state.serviceRecords] }));
       },
 
@@ -153,7 +192,7 @@ export const useStore = create<AppState>()(
           status: schedule.status || 'scheduled',
           createdAt: new Date().toISOString().split('T')[0],
           ...schedule,
-        };
+        } as Schedule;
         set(state => ({ schedules: [newSchedule, ...state.schedules] }));
       },
 
@@ -171,7 +210,7 @@ export const useStore = create<AppState>()(
           participants: [],
           createdAt: new Date().toISOString().split('T')[0],
           ...record,
-        };
+        } as TrialRecord;
         set(state => ({ trialRecords: [newRecord, ...state.trialRecords] }));
       },
 
@@ -189,7 +228,7 @@ export const useStore = create<AppState>()(
           distributions: [],
           createdAt: new Date().toISOString().split('T')[0],
           ...record,
-        };
+        } as ExecutionRecord;
         set(state => ({ executionRecords: [newRecord, ...state.executionRecords] }));
       },
 
@@ -211,22 +250,13 @@ export const useStore = create<AppState>()(
         }));
       },
 
-      refreshStats: () => {
-        const { cases } = get();
-        const total = cases.length;
-        const closed = cases.filter(c => c.status === 'closed').length;
-        const pending = total - closed;
-        
-        set(state => ({
-          statsData: {
-            ...state.statsData,
-            totalCases: total,
-            closedCases: closed,
-            pendingCases: pending,
-            todayNewCases: state.statsData.todayNewCases + Math.floor(Math.random() * 3),
-            todayClosedCases: state.statsData.todayClosedCases + Math.floor(Math.random() * 2),
-          },
-        }));
+      refreshStats: async () => {
+        try {
+          const stats = await api.stats.overview();
+          set({ statsData: stats });
+        } catch (e) {
+          console.error('Refresh stats failed:', e);
+        }
       },
     }),
     {

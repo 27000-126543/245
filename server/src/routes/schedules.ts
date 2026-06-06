@@ -1,111 +1,165 @@
-import { Router } from 'express';
-import { db } from '../db';
+import express from 'express';
+import db from '../db.js';
+import dayjs from 'dayjs';
 
-const router = Router();
+const router = express.Router();
 
 router.get('/', (req, res) => {
-  const { status, date, search } = req.query;
-  let sql = 'SELECT * FROM schedules WHERE 1=1';
-  const params: any[] = [];
+  try {
+    const { status, judgeId, date, page = 1, pageSize = 50 } = req.query;
+    let query = 'SELECT * FROM schedules WHERE 1=1';
+    const params: any[] = [];
 
-  if (status && status !== 'all') {
-    sql += ' AND status = ?';
-    params.push(status);
-  }
-  if (date) {
-    sql += ' AND date = ?';
-    params.push(date);
-  }
-  if (search) {
-    sql += ' AND (caseNumber LIKE ? OR caseName LIKE ? OR judgeName LIKE ?)';
-    const searchTerm = `%${search}%`;
-    params.push(searchTerm, searchTerm, searchTerm);
-  }
+    if (status) {
+      query += ' AND status = ?';
+      params.push(status);
+    }
+    if (judgeId) {
+      query += ' AND judgeId = ?';
+      params.push(judgeId);
+    }
+    if (date) {
+      query += ' AND date = ?';
+      params.push(date);
+    }
 
-  sql += ' ORDER BY date DESC, startTime ASC';
-  const schedules = db.prepare(sql).all(...params);
-  res.json(schedules);
+    query += ' ORDER BY date ASC, startTime ASC LIMIT ? OFFSET ?';
+    params.push(Number(pageSize), (Number(page) - 1) * Number(pageSize));
+
+    const items = db.prepare(query).all(...params);
+    
+    let countQuery = 'SELECT COUNT(*) as total FROM schedules WHERE 1=1';
+    const countParams = params.slice(0, -2);
+    const countResult = db.prepare(countQuery).get(...countParams) as { total: number };
+
+    res.json({
+      items,
+      total: countResult.total,
+      page: Number(page),
+      pageSize: Number(pageSize),
+    });
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.get('/:id', (req, res) => {
-  const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(req.params.id);
-  if (!schedule) return res.status(404).json({ message: '排期不存在' });
-  res.json(schedule);
+  try {
+    const { id } = req.params;
+    const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
+    if (!schedule) {
+      return res.status(404).json({ message: '排期不存在' });
+    }
+    res.json(schedule);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.post('/', (req, res) => {
-  const {
-    caseId, caseNumber, caseName, judgeId, judgeName,
-    courtRoomId, courtRoomName, date, startTime, endTime, type,
-  } = req.body;
+  try {
+    const id = crypto.randomUUID();
+    const {
+      caseId, caseNumber, caseName, judgeId, judgeName,
+      courtRoomId, courtRoomName, date, startTime, endTime, type,
+    } = req.body;
 
-  const conflicts: string[] = [];
-  const existing = db.prepare(`
-    SELECT * FROM schedules 
-    WHERE date = ? AND status != 'cancelled'
-  `).all(date) as any[];
+    const createdAt = dayjs().format('YYYY-MM-DD HH:mm:ss');
 
-  existing.forEach(s => {
-    if (s.judgeId === judgeId) {
-      conflicts.push(`法官时间冲突：${s.caseNumber} ${s.startTime}-${s.endTime}`);
-    }
-    if (s.courtRoomId === courtRoomId) {
-      conflicts.push(`法庭时间冲突：${s.caseNumber} ${s.startTime}-${s.endTime}`);
-    }
-  });
+    db.prepare(`
+      INSERT INTO schedules (id, caseId, caseNumber, caseName, judgeId, judgeName,
+        courtRoomId, courtRoomName, date, startTime, endTime, type, status, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, caseId, caseNumber, caseName, judgeId, judgeName,
+      courtRoomId, courtRoomName, date, startTime, endTime, type || 'trial',
+      'scheduled', createdAt
+    );
 
-  const id = String(Date.now());
-  const status = conflicts.length > 0 ? 'queued' : 'scheduled';
-  const createdAt = new Date().toISOString().split('T')[0];
-
-  db.prepare(`
-    INSERT INTO schedules (id, caseId, caseNumber, caseName, judgeId, judgeName,
-      courtRoomId, courtRoomName, date, startTime, endTime, type, status, createdAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id, caseId, caseNumber, caseName, judgeId, judgeName,
-    courtRoomId, courtRoomName, date, startTime, endTime, type, status, createdAt
-  );
-
-  const newSchedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
-  res.status(201).json({ schedule: newSchedule, conflicts });
+    const newSchedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
+    res.status(201).json(newSchedule);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.put('/:id', (req, res) => {
-  const { status } = req.body;
-  
-  db.prepare('UPDATE schedules SET status = ? WHERE id = ?')
-    .run(status, req.params.id);
+  try {
+    const { id } = req.params;
+    const fields = [
+      'date', 'startTime', 'endTime', 'courtRoomId', 'courtRoomName',
+      'judgeId', 'judgeName', 'status', 'type',
+    ];
+    const updates: string[] = [];
+    const params: any[] = [];
 
-  const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(req.params.id);
-  res.json(schedule);
+    fields.forEach(field => {
+      if (req.body[field] !== undefined) {
+        updates.push(`${field} = ?`);
+        params.push(req.body[field]);
+      }
+    });
+
+    if (updates.length > 0) {
+      params.push(id);
+      db.prepare(`UPDATE schedules SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    }
+
+    const updatedSchedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
+    res.json(updatedSchedule);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.delete('/:id', (req, res) => {
-  db.prepare('UPDATE schedules SET status = ? WHERE id = ?')
-    .run('cancelled', req.params.id);
-  res.json({ message: '排期已取消' });
+  try {
+    const { id } = req.params;
+    db.prepare('DELETE FROM schedules WHERE id = ?').run(id);
+    res.status(204).send();
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.get('/check/conflicts', (req, res) => {
-  const { date, judgeId, courtRoomId } = req.query;
-  
-  const existing = db.prepare(`
-    SELECT * FROM schedules 
-    WHERE date = ? AND status != 'cancelled'
-  `).all(date) as any[];
+  try {
+    const { date, startTime, endTime, courtRoomId, judgeId, excludeId } = req.query;
+    
+    let query = `
+      SELECT * FROM schedules 
+      WHERE date = ? 
+        AND ((startTime < ? AND endTime > ?) OR (startTime >= ? AND startTime < ?))
+        AND status != 'cancelled'
+        AND status != 'completed'
+    `;
+    const params: any[] = [date, endTime, startTime, startTime, endTime];
 
-  const conflicts: string[] = [];
-  existing.forEach(s => {
-    if (s.judgeId === judgeId) {
-      conflicts.push(`法官时间冲突：${s.caseNumber} ${s.startTime}-${s.endTime}`);
+    if (courtRoomId) {
+      query += ' AND courtRoomId = ?';
+      params.push(courtRoomId);
     }
-    if (s.courtRoomId === courtRoomId) {
-      conflicts.push(`法庭时间冲突：${s.caseNumber} ${s.startTime}-${s.endTime}`);
+    if (judgeId) {
+      query += ' AND judgeId = ?';
+      params.push(judgeId);
     }
-  });
+    if (excludeId) {
+      query += ' AND id != ?';
+      params.push(excludeId);
+    }
 
-  res.json({ conflicts, hasConflict: conflicts.length > 0 });
+    const conflicts = db.prepare(query).all(...params);
+    
+    res.json({
+      hasConflict: conflicts.length > 0,
+      conflicts,
+      message: conflicts.length > 0 
+        ? `检测到 ${conflicts.length} 个时间冲突`
+        : '无冲突，可以排期',
+    });
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 export default router;

@@ -8,7 +8,7 @@ import { Select } from '../components/ui/Input';
 
 const Login: React.FC = () => {
   const navigate = useNavigate();
-  const { login, currentUser, darkMode, toggleDarkMode } = useStore();
+  const { login, currentUser, darkMode, toggleDarkMode, loadAllData } = useStore();
   const [username, setUsername] = useState('president');
   const [password, setPassword] = useState('123456');
   const [showPassword, setShowPassword] = useState(false);
@@ -37,12 +37,13 @@ const Login: React.FC = () => {
     try {
       const success = await login(username, password);
       if (success) {
+        await loadAllData();
         navigate('/dashboard');
       } else {
         setError('用户名或密码错误');
       }
-    } catch (err) {
-      setError('登录失败，请稍后重试');
+    } catch (err: any) {
+      setError(err?.message || '登录失败，请稍后重试');
     } finally {
       setLoading(false);
     }

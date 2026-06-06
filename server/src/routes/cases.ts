@@ -1,106 +1,176 @@
-import { Router } from 'express';
-import { db } from '../db';
+import express from 'express';
+import db from '../db.js';
 import dayjs from 'dayjs';
 
-const router = Router();
+const router = express.Router();
 
 router.get('/', (req, res) => {
-  const { status, search } = req.query;
-  let sql = 'SELECT * FROM cases WHERE 1=1';
-  const params: any[] = [];
+  try {
+    const { status, caseType, keyword, judgeId, page = 1, pageSize = 10 } = req.query;
+    let query = 'SELECT * FROM cases WHERE 1=1';
+    const params: any[] = [];
 
-  if (status && status !== 'all') {
-    sql += ' AND status = ?';
-    params.push(status);
-  }
-  if (search) {
-    sql += ' AND (caseNumber LIKE ? OR plaintiff LIKE ? OR defendant LIKE ? OR causeOfAction LIKE ?)';
-    const searchTerm = `%${search}%`;
-    params.push(searchTerm, searchTerm, searchTerm, searchTerm);
-  }
+    if (status) {
+      query += ' AND status = ?';
+      params.push(status);
+    }
+    if (caseType) {
+      query += ' AND caseType = ?';
+      params.push(caseType);
+    }
+    if (keyword) {
+      query += ' AND (caseNumber LIKE ? OR plaintiff LIKE ? OR defendant LIKE ? OR causeOfAction LIKE ?)';
+      const kw = `%${keyword}%`;
+      params.push(kw, kw, kw, kw);
+    }
+    if (judgeId) {
+      query += ' AND judgeId = ?';
+      params.push(judgeId);
+    }
 
-  sql += ' ORDER BY createdAt DESC';
-  const cases = db.prepare(sql).all(...params).map((c: any) => ({
-    ...c,
-    filingMaterials: c.filingMaterials ? JSON.parse(c.filingMaterials) : [],
-  }));
-  res.json(cases);
+    query += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
+    params.push(Number(pageSize), (Number(page) - 1) * Number(pageSize));
+
+    const cases = db.prepare(query).all(...params);
+    
+    let countQuery = 'SELECT COUNT(*) as total FROM cases WHERE 1=1';
+    const countParams = params.slice(0, -2);
+    const countResult = db.prepare(countQuery).get(...countParams) as { total: number };
+
+    res.json({
+      items: cases,
+      total: countResult.total,
+      page: Number(page),
+      pageSize: Number(pageSize),
+    });
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.get('/:id', (req, res) => {
-  const caseData = db.prepare('SELECT * FROM cases WHERE id = ?').get(req.params.id) as any;
-  if (!caseData) return res.status(404).json({ message: '案件不存在' });
-  
-  caseData.filingMaterials = caseData.filingMaterials ? JSON.parse(caseData.filingMaterials) : [];
-  res.json(caseData);
+  try {
+    const { id } = req.params;
+    const caseItem = db.prepare('SELECT * FROM cases WHERE id = ?').get(id) as any;
+    if (!caseItem) {
+      return res.status(404).json({ message: '案件不存在' });
+    }
+    res.json(caseItem);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.post('/', (req, res) => {
-  const {
-    caseType, causeOfAction, plaintiff, defendant,
-    plaintiffPhone, defendantPhone, plaintiffAddress, defendantAddress,
-    clerkId, clerkName, amount, description,
-  } = req.body;
+  try {
+    const id = crypto.randomUUID();
+    const {
+      caseType, causeOfAction, plaintiff, defendant,
+      plaintiffPhone, defendantPhone, plaintiffAddress, defendantAddress,
+      judgeId, judgeName, clerkId, clerkName, departmentId, departmentName,
+      estimatedDays = 60, filingMaterials, description, amount,
+    } = req.body;
 
-  const id = String(Date.now());
-  const year = new Date().getFullYear();
-  const caseNumber = `(${year})京0101民初${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}号`;
-  const createdAt = dayjs().format('YYYY-MM-DD');
-  const deadline = dayjs().add(90, 'day').format('YYYY-MM-DD');
+    const year = new Date().getFullYear();
+    const count = db.prepare('SELECT COUNT(*) as c FROM cases').get() as { c: number };
+    const caseNumber = `(${year})京0101民初${String(count.c + 1).padStart(4, '0')}号`;
+    
+    const createdAt = dayjs().format('YYYY-MM-DD');
+    const deadline = dayjs(createdAt).add(estimatedDays, 'day').format('YYYY-MM-DD');
 
-  db.prepare(`
-    INSERT INTO cases (id, caseNumber, caseType, causeOfAction, plaintiff, defendant,
-      plaintiffPhone, defendantPhone, plaintiffAddress, defendantAddress, status,
-      clerkId, clerkName, estimatedDays, createdAt, deadline, description, amount, filingMaterials)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'filed', ?, ?, 60, ?, ?, ?, ?, '[]')
-  `).run(
-    id, caseNumber, caseType, causeOfAction, plaintiff, defendant,
-    plaintiffPhone, defendantPhone, plaintiffAddress, defendantAddress,
-    clerkId, clerkName, createdAt, deadline, description, amount
-  );
+    db.prepare(`
+      INSERT INTO cases (id, caseNumber, caseType, causeOfAction, plaintiff, defendant,
+        plaintiffPhone, defendantPhone, plaintiffAddress, defendantAddress, status,
+        judgeId, judgeName, clerkId, clerkName, departmentId, departmentName,
+        estimatedDays, createdAt, deadline, filingMaterials, description, amount)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, caseNumber, caseType, causeOfAction, plaintiff, defendant,
+      plaintiffPhone, defendantPhone, plaintiffAddress, defendantAddress,
+      judgeId ? 'assigned' : 'filed',
+      judgeId, judgeName, clerkId, clerkName, departmentId, departmentName,
+      estimatedDays, createdAt, deadline,
+      filingMaterials ? JSON.stringify(filingMaterials) : null,
+      description, amount
+    );
 
-  const newCase = db.prepare('SELECT * FROM cases WHERE id = ?').get(id) as any;
-  newCase.filingMaterials = [];
-  res.status(201).json(newCase);
+    const newCase = db.prepare('SELECT * FROM cases WHERE id = ?').get(id);
+    res.status(201).json(newCase);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.put('/:id', (req, res) => {
-  const { judgeId, judgeName, departmentId, departmentName, status } = req.body;
-  
-  db.prepare(`
-    UPDATE cases SET judgeId = ?, judgeName = ?, departmentId = ?, departmentName = ?, status = ?
-    WHERE id = ?
-  `).run(judgeId, judgeName, departmentId, departmentName, status, req.params.id);
+  try {
+    const { id } = req.params;
+    const fields = [
+      'caseType', 'causeOfAction', 'plaintiff', 'defendant',
+      'plaintiffPhone', 'defendantPhone', 'plaintiffAddress', 'defendantAddress',
+      'status', 'judgeId', 'judgeName', 'clerkId', 'clerkName',
+      'departmentId', 'departmentName', 'estimatedDays', 'actualDays',
+      'deadline', 'filingMaterials', 'description', 'amount',
+    ];
 
-  const caseData = db.prepare('SELECT * FROM cases WHERE id = ?').get(req.params.id) as any;
-  caseData.filingMaterials = caseData.filingMaterials ? JSON.parse(caseData.filingMaterials) : [];
-  res.json(caseData);
+    const updates: string[] = [];
+    const params: any[] = [];
+
+    fields.forEach(field => {
+      if (req.body[field] !== undefined) {
+        if (field === 'filingMaterials' && Array.isArray(req.body[field])) {
+          updates.push(`${field} = ?`);
+          params.push(JSON.stringify(req.body[field]));
+        } else {
+          updates.push(`${field} = ?`);
+          params.push(req.body[field]);
+        }
+      }
+    });
+
+    if (updates.length > 0) {
+      params.push(id);
+      db.prepare(`UPDATE cases SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    }
+
+    const updatedCase = db.prepare('SELECT * FROM cases WHERE id = ?').get(id);
+    res.json(updatedCase);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.get('/:id/recommend-judges', (req, res) => {
-  const causeOfAction = req.query.causeOfAction as string;
-  
-  const judges = db.prepare(`
-    SELECT id, name, department, 
-      (SELECT COUNT(*) FROM cases WHERE judgeId = users.id) as caseCount,
-      (SELECT AVG(actualDays) FROM cases WHERE judgeId = users.id AND status = 'closed') as avgDays
-    FROM users 
-    WHERE role = 'judge'
-    ORDER BY caseCount ASC
-    LIMIT 3
-  `).all();
+  try {
+    const { id } = req.params;
+    const caseItem = db.prepare('SELECT * FROM cases WHERE id = ?').get(id) as any;
+    if (!caseItem) {
+      return res.status(404).json({ message: '案件不存在' });
+    }
 
-  const recommendations = judges.map((j: any, idx: number) => ({
-    judgeId: j.id,
-    judgeName: j.name,
-    department: j.department === '1' ? '民事审判第一庭' : j.department === '2' ? '民事审判第二庭' : j.department === '3' ? '刑事审判第一庭' : '行政审判庭',
-    similarityScore: Math.floor(90 + Math.random() * 10),
-    avgDays: Math.round(j.avgDays || 45),
-    caseCount: j.caseCount || 0,
-    recommended: idx === 0,
-  }));
+    const judges = db.prepare(`
+      SELECT 
+        u.id,
+        u.name,
+        u.department,
+        (SELECT COUNT(*) FROM cases WHERE judgeId = u.id AND status != 'closed') as currentCases,
+        (SELECT COUNT(*) FROM cases WHERE judgeId = u.id AND caseType = ?) as typeExperience
+      FROM users u
+      WHERE u.role = 'judge'
+      ORDER BY typeExperience DESC, currentCases ASC
+    `).all(caseItem.caseType);
 
-  res.json(recommendations);
+    const recommendations = judges.map((j: any) => ({
+      ...j,
+      score: Math.min(100, j.typeExperience * 10 + Math.max(0, 50 - j.currentCases * 5)),
+      reason: j.typeExperience >= 5 
+        ? `擅长处理${caseItem.caseType === 'civil' ? '民事' : caseItem.caseType === 'criminal' ? '刑事' : '行政'}案件，经验丰富`
+        : '案件量适中，可快速分配',
+    }));
+
+    res.json(recommendations);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 export default router;

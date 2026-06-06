@@ -44,7 +44,7 @@ export interface CourtRoom {
   name: string;
   location: string;
   capacity: number;
-  equipment: string[];
+  equipment: string;
 }
 
 export interface Case {
@@ -179,6 +179,16 @@ export interface ExecutionRecord {
   createdAt: string;
 }
 
+export interface Notification {
+  id: string;
+  type: 'info' | 'warning' | 'success' | 'error';
+  title: string;
+  message: string;
+  read: number;
+  createdAt: string;
+  userId?: string;
+}
+
 export interface StatsData {
   totalCases: number;
   closedCases: number;
@@ -188,14 +198,4 @@ export interface StatsData {
   appealRate: number;
   todayNewCases: number;
   todayClosedCases: number;
-}
-
-export interface Notification {
-  id: string;
-  type: 'info' | 'warning' | 'success' | 'error';
-  title: string;
-  message: string;
-  read: number;
-  createdAt: string;
-  userId?: string;
 }

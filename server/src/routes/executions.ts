@@ -1,118 +1,195 @@
-import { Router } from 'express';
-import { db } from '../db';
+import express from 'express';
+import db from '../db.js';
+import dayjs from 'dayjs';
 
-const router = Router();
+const router = express.Router();
 
 router.get('/', (req, res) => {
-  const { status, search } = req.query;
-  let sql = 'SELECT * FROM execution_records WHERE 1=1';
-  const params: any[] = [];
+  try {
+    const { status, applicant, page = 1, pageSize = 10 } = req.query;
+    let query = 'SELECT * FROM execution_records WHERE 1=1';
+    const params: any[] = [];
 
-  if (status && status !== 'all') {
-    sql += ' AND status = ?';
-    params.push(status);
-  }
-  if (search) {
-    sql += ' AND (caseNumber LIKE ? OR applicant LIKE ? OR respondent LIKE ?)';
-    const searchTerm = `%${search}%`;
-    params.push(searchTerm, searchTerm, searchTerm);
-  }
+    if (status) {
+      query += ' AND status = ?';
+      params.push(status);
+    }
+    if (applicant) {
+      query += ' AND applicant LIKE ?';
+      params.push(`%${applicant}%`);
+    }
 
-  sql += ' ORDER BY createdAt DESC';
-  const records = db.prepare(sql).all(...params);
-  res.json(records);
+    query += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
+    params.push(Number(pageSize), (Number(page) - 1) * Number(pageSize));
+
+    const items = db.prepare(query).all(...params);
+    
+    let countQuery = 'SELECT COUNT(*) as total FROM execution_records WHERE 1=1';
+    const countParams = params.slice(0, -2);
+    const countResult = db.prepare(countQuery).get(...countParams) as { total: number };
+
+    const itemsWithDetails = items.map((item: any) => {
+      const propertyControls = db.prepare('SELECT * FROM property_controls WHERE executionId = ?').all(item.id);
+      const distributions = db.prepare('SELECT * FROM execution_distributions WHERE executionId = ?').all(item.id);
+      return {
+        ...item,
+        propertyControls,
+        distributions,
+      };
+    });
+
+    res.json({
+      items: itemsWithDetails,
+      total: countResult.total,
+      page: Number(page),
+      pageSize: Number(pageSize),
+    });
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.get('/:id', (req, res) => {
-  const record = db.prepare('SELECT * FROM execution_records WHERE id = ?').get(req.params.id) as any;
-  if (!record) return res.status(404).json({ message: '执行记录不存在' });
-  
-  const propertyControls = db.prepare('SELECT * FROM property_controls WHERE executionId = ?').all(req.params.id);
-  const distributions = db.prepare('SELECT * FROM execution_distributions WHERE executionId = ?').all(req.params.id);
-  
-  res.json({ ...record, propertyControls, distributions });
+  try {
+    const { id } = req.params;
+    const record = db.prepare('SELECT * FROM execution_records WHERE id = ?').get(id) as any;
+    if (!record) {
+      return res.status(404).json({ message: '执行记录不存在' });
+    }
+    
+    const propertyControls = db.prepare('SELECT * FROM property_controls WHERE executionId = ?').all(id);
+    const distributions = db.prepare('SELECT * FROM execution_distributions WHERE executionId = ?').all(id);
+
+    res.json({
+      ...record,
+      propertyControls,
+      distributions,
+    });
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.post('/', (req, res) => {
-  const { caseId, caseNumber, applicant, respondent, amount } = req.body;
+  try {
+    const id = crypto.randomUUID();
+    const {
+      caseId, caseNumber, applicant, respondent, amount,
+    } = req.body;
 
-  const id = String(Date.now());
-  const createdAt = new Date().toISOString().split('T')[0];
+    const createdAt = dayjs().format('YYYY-MM-DD HH:mm:ss');
 
-  db.prepare(`
-    INSERT INTO execution_records (id, caseId, caseNumber, applicant, respondent, amount,
-      recoveredAmount, status, createdAt)
-    VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?)
-  `).run(id, caseId, caseNumber, applicant, respondent, amount, createdAt);
+    db.prepare(`
+      INSERT INTO execution_records (id, caseId, caseNumber, applicant, respondent,
+        amount, recoveredAmount, status, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?)
+    `).run(id, caseId, caseNumber, applicant, respondent, amount, createdAt);
 
-  const newRecord = db.prepare('SELECT * FROM execution_records WHERE id = ?').get(id);
-  res.status(201).json(newRecord);
+    const newRecord = db.prepare('SELECT * FROM execution_records WHERE id = ?').get(id);
+    res.status(201).json(newRecord);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.put('/:id', (req, res) => {
-  const { status, recoveredAmount } = req.body;
-  
-  db.prepare(`
-    UPDATE execution_records SET status = ?, recoveredAmount = ?
-    WHERE id = ?
-  `).run(status, recoveredAmount, req.params.id);
+  try {
+    const { id } = req.params;
+    const fields = ['applicant', 'respondent', 'amount', 'recoveredAmount', 'status'];
+    const updates: string[] = [];
+    const params: any[] = [];
 
-  const record = db.prepare('SELECT * FROM execution_records WHERE id = ?').get(req.params.id);
-  res.json(record);
+    fields.forEach(field => {
+      if (req.body[field] !== undefined) {
+        updates.push(`${field} = ?`);
+        params.push(req.body[field]);
+      }
+    });
+
+    if (updates.length > 0) {
+      params.push(id);
+      db.prepare(`UPDATE execution_records SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    }
+
+    const updatedRecord = db.prepare('SELECT * FROM execution_records WHERE id = ?').get(id);
+    res.json(updatedRecord);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.post('/:id/property-controls', (req, res) => {
-  const { type, description, amount } = req.body;
-  const id = String(Date.now());
-  const createdAt = new Date().toISOString().split('T')[0];
+  try {
+    const { id } = req.params;
+    const controlId = crypto.randomUUID();
+    const { type, description, amount } = req.body;
 
-  db.prepare(`
-    INSERT INTO property_controls (id, executionId, type, description, amount, status, createdAt)
-    VALUES (?, ?, ?, ?, ?, 'frozen', ?)
-  `).run(id, req.params.id, type, description, amount, createdAt);
+    db.prepare(`
+      INSERT INTO property_controls (id, executionId, type, description, amount, status, createdAt)
+      VALUES (?, ?, ?, ?, ?, 'frozen', ?)
+    `).run(controlId, id, type, description, amount, dayjs().format('YYYY-MM-DD HH:mm:ss'));
 
-  db.prepare(`
-    UPDATE execution_records SET status = 'executing' WHERE id = ?
-  `).run(req.params.id);
-
-  const control = db.prepare('SELECT * FROM property_controls WHERE id = ?').get(id);
-  res.status(201).json(control);
+    const newControl = db.prepare('SELECT * FROM property_controls WHERE id = ?').get(controlId);
+    res.status(201).json(newControl);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.post('/:id/distributions', (req, res) => {
-  const { recipient, amount, remark } = req.body;
-  const id = String(Date.now());
-  const createdAt = new Date().toISOString().split('T')[0];
-  const paidAt = new Date().toISOString().split('T')[0];
+  try {
+    const { id } = req.params;
+    const distId = crypto.randomUUID();
+    const { recipient, amount, remark } = req.body;
 
-  db.prepare(`
-    INSERT INTO execution_distributions (id, executionId, recipient, amount, status, paidAt, remark, createdAt)
-    VALUES (?, ?, ?, ?, 'paid', ?, ?, ?)
-  `).run(id, req.params.id, recipient, amount, paidAt, remark, createdAt);
+    db.prepare(`
+      INSERT INTO execution_distributions (id, executionId, recipient, amount, status, remark, createdAt)
+      VALUES (?, ?, ?, ?, 'pending', ?, ?)
+    `).run(distId, id, recipient, amount, remark, dayjs().format('YYYY-MM-DD HH:mm:ss'));
 
-  const dist = db.prepare('SELECT * FROM execution_distributions WHERE id = ?').get(id);
-  
-  const execRecord = db.prepare('SELECT * FROM execution_records WHERE id = ?').get(req.params.id) as any;
-  const newRecovered = (execRecord?.recoveredAmount || 0) + Number(amount);
-  
-  db.prepare(`
-    UPDATE execution_records SET recoveredAmount = ?, status = 'completed' WHERE id = ?
-  `).run(newRecovered, req.params.id);
-
-  res.status(201).json(dist);
+    const newDist = db.prepare('SELECT * FROM execution_distributions WHERE id = ?').get(distId);
+    res.status(201).json(newDist);
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 router.post('/query-assets', (req, res) => {
-  const { name, idCard } = req.body;
-  
-  setTimeout(() => {
-    res.json([
-      { type: '银行账户', bank: '工商银行', account: '6222****8888', balance: 125000, status: 'normal' },
-      { type: '银行账户', bank: '建设银行', account: '6217****6666', balance: 89500, status: 'normal' },
-      { type: '房产', location: '北京市朝阳区建国路88号', area: '120㎡', value: 6800000, status: 'normal' },
-      { type: '车辆', brand: '奔驰', plate: '京A12345', value: 450000, status: 'normal' },
-    ]);
-  }, 1500);
+  try {
+    const { name, idCard } = req.body;
+    
+    const assets = [
+      {
+        id: crypto.randomUUID(),
+        type: 'bank_account',
+        name: '中国工商银行',
+        description: `账户尾号${Math.floor(Math.random() * 9000) + 1000}`,
+        amount: Math.floor(Math.random() * 500000) + 10000,
+      },
+      {
+        id: crypto.randomUUID(),
+        type: 'house',
+        name: '不动产',
+        description: `位于${['朝阳区', '海淀区', '东城区', '西城区'][Math.floor(Math.random() * 4)]}的房产`,
+        amount: Math.floor(Math.random() * 5000000) + 1000000,
+      },
+      {
+        id: crypto.randomUUID(),
+        type: 'vehicle',
+        name: '机动车',
+        description: `车牌号京${String.fromCharCode(65 + Math.floor(Math.random() * 26))}${Math.floor(Math.random() * 90000) + 10000}`,
+        amount: Math.floor(Math.random() * 500000) + 50000,
+      },
+    ];
+
+    res.json({
+      name,
+      queryTime: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      assets: assets.slice(0, Math.floor(Math.random() * 3) + 1),
+    });
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 export default router;

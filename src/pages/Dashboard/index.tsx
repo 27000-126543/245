@@ -17,14 +17,10 @@ import { Card, CardContent } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { Select } from '../../components/ui/Input';
 import { useStore } from '../../store/useStore';
-import {
-  caseTrend,
-  departmentStats,
-  causeStats,
-  appealHeatmap,
-} from '../../data/mockData';
+import api from '../../services/api';
 import { formatDate } from '../../utils/format';
 import { cn } from '../../lib/utils';
+import type { CaseTrendItem, DepartmentStats, CauseStats, AppealHeatmapItem } from '../../types';
 
 const Dashboard: React.FC = () => {
   const { statsData, refreshStats, cases } = useStore();
@@ -33,11 +29,43 @@ const Dashboard: React.FC = () => {
   const [dateRange, setDateRange] = useState('month');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [displayStats, setDisplayStats] = useState(statsData);
+  const [caseTrend, setCaseTrend] = useState<CaseTrendItem[]>([]);
+  const [departmentStats, setDepartmentStats] = useState<DepartmentStats[]>([]);
+  const [causeStats, setCauseStats] = useState<CauseStats[]>([]);
+  const [appealHeatmap, setAppealHeatmap] = useState<AppealHeatmapItem[]>([]);
+  const [executionRate, setExecutionRate] = useState<any[]>([]);
+  const [deadlineWarnings, setDeadlineWarnings] = useState<any[]>([]);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const loadAllChartData = async () => {
+    try {
+      const [trend, byCaseType, byDept, execRate, heatmap, warnings] = await Promise.all([
+        api.stats.caseTrend(),
+        api.stats.byCaseType(),
+        api.stats.byDepartment(),
+        api.stats.executionRate(),
+        api.stats.appealHeatmap(),
+        api.stats.deadlineWarnings(),
+      ]);
+      setCaseTrend(trend);
+      setCauseStats(byCaseType);
+      setDepartmentStats(byDept);
+      setExecutionRate(execRate);
+      setAppealHeatmap(heatmap);
+      setDeadlineWarnings(warnings);
+    } catch (e) {
+      console.error('Load chart data failed:', e);
+    }
+  };
+
+  useEffect(() => {
+    loadAllChartData();
+  }, []);
 
   useEffect(() => {
     intervalRef.current = setInterval(() => {
       refreshStats();
+      loadAllChartData();
       setIsRefreshing(true);
       setTimeout(() => setIsRefreshing(false), 500);
     }, 5000);
@@ -56,6 +84,7 @@ const Dashboard: React.FC = () => {
   const handleRefresh = () => {
     setIsRefreshing(true);
     refreshStats();
+    loadAllChartData();
     setTimeout(() => setIsRefreshing(false), 500);
   };
 
