@@ -1,84 +1,88 @@
-import express from 'express';
-import db from '../db.js';
+const express = require('express');
+const { query, queryOne, execute } = require('../db');
 
 const router = express.Router();
 
 router.post('/login', (req, res) => {
   try {
     const { username, password } = req.body;
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as any;
-
+    const user = queryOne('SELECT * FROM users WHERE username = ? AND password = ?', [username, password]);
+    
     if (!user) {
-      return res.status(401).json({ message: '用户名或密码错误' });
+      return res.status(401).json({ code: 401, message: '用户名或密码错误' });
     }
-
-    if (user.password !== password) {
-      return res.status(401).json({ message: '用户名或密码错误' });
-    }
-
-    const { password: _, ...userWithoutPassword } = user;
-    res.json({ user: userWithoutPassword });
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
+    
+    const token = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
+    
+    res.json({
+      code: 200,
+      message: '登录成功',
+      data: {
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          name: user.name,
+          role: user.role,
+          departmentId: user.departmentId,
+          departmentName: user.departmentName,
+          phone: user.phone
+        }
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
   }
 });
 
 router.get('/users', (req, res) => {
   try {
-    const users = db.prepare('SELECT id, username, name, role, department, phone, email FROM users').all();
-    res.json(users);
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
+    const users = query('SELECT id, username, name, role, departmentId, departmentName, phone, createdAt FROM users');
+    res.json({ code: 200, data: users });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
+  }
+});
+
+router.get('/users/:id', (req, res) => {
+  try {
+    const user = queryOne('SELECT id, username, name, role, departmentId, departmentName, phone, createdAt FROM users WHERE id = ?', [req.params.id]);
+    if (!user) return res.status(404).json({ code: 404, message: '用户不存在' });
+    res.json({ code: 200, data: user });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
   }
 });
 
 router.post('/users', (req, res) => {
   try {
-    const { username, name, role, department, phone, email, password = '123456' } = req.body;
-    const id = crypto.randomUUID();
-    db.prepare(`
-      INSERT INTO users (id, username, name, role, department, phone, email, password)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, username, name, role, department, phone, email, password);
-
-    const user = db.prepare('SELECT id, username, name, role, department, phone, email FROM users WHERE id = ?').get(id);
-    res.status(201).json(user);
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
+    const { username, password, name, role, departmentId, departmentName, phone } = req.body;
+    const id = String(Date.now());
+    const createdAt = new Date().toISOString();
+    execute('INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [id, username, password, name, role, departmentId, departmentName, phone, createdAt]);
+    res.json({ code: 200, message: '创建成功', data: { id } });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
   }
 });
 
 router.put('/users/:id', (req, res) => {
   try {
-    const { id } = req.params;
-    const { name, role, department, phone, email, password } = req.body;
-    
-    let query = 'UPDATE users SET name = ?, role = ?, department = ?, phone = ?, email = ?';
-    const params = [name, role, department, phone, email];
-    
-    if (password) {
-      query += ', password = ?';
-      params.push(password);
-    }
-    query += ' WHERE id = ?';
-    params.push(id);
-    
-    db.prepare(query).run(...params);
-    const user = db.prepare('SELECT id, username, name, role, department, phone, email FROM users WHERE id = ?').get(id);
-    res.json(user);
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
+    const { name, role, departmentId, departmentName, phone } = req.body;
+    execute('UPDATE users SET name = ?, role = ?, departmentId = ?, departmentName = ?, phone = ? WHERE id = ?', [name, role, departmentId, departmentName, phone, req.params.id]);
+    res.json({ code: 200, message: '更新成功' });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
   }
 });
 
 router.delete('/users/:id', (req, res) => {
   try {
-    const { id } = req.params;
-    db.prepare('DELETE FROM users WHERE id = ?').run(id);
-    res.status(204).send();
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
+    execute('DELETE FROM users WHERE id = ?', [req.params.id]);
+    res.json({ code: 200, message: '删除成功' });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
   }
 });
 
-export default router;
+module.exports = router;

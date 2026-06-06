@@ -1,239 +1,101 @@
-import express from 'express';
-import db from '../db.js';
-import dayjs from 'dayjs';
+const express = require('express');
+const { query, queryOne, execute } = require('../db');
 
 const router = express.Router();
 
 router.get('/', (req, res) => {
   try {
-    const { status, caseId, authorId, page = 1, pageSize = 10 } = req.query;
-    let query = 'SELECT * FROM documents WHERE 1=1';
-    const params: any[] = [];
-
-    if (status) {
-      query += ' AND status = ?';
-      params.push(status);
-    }
-    if (caseId) {
-      query += ' AND caseId = ?';
-      params.push(caseId);
-    }
-    if (authorId) {
-      query += ' AND authorId = ?';
-      params.push(authorId);
-    }
-
-    query += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
-    params.push(Number(pageSize), (Number(page) - 1) * Number(pageSize));
-
-    const items = db.prepare(query).all(...params);
+    const { status, caseId, page = 1, pageSize = 20 } = req.query;
+    let sql = 'SELECT * FROM documents WHERE 1=1';
+    const params = [];
     
-    let countQuery = 'SELECT COUNT(*) as total FROM documents WHERE 1=1';
-    const countParams = params.slice(0, -2);
-    const countResult = db.prepare(countQuery).get(...countParams) as { total: number };
-
-    res.json({
-      items: items.map((item: any) => ({
-        ...item,
-        approvals: item.approvals ? JSON.parse(item.approvals) : [],
-        suggestedPoints: item.suggestedPoints ? JSON.parse(item.suggestedPoints) : null,
-      })),
-      total: countResult.total,
-      page: Number(page),
-      pageSize: Number(pageSize),
-    });
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
+    if (status) { sql += ' AND status = ?'; params.push(status); }
+    if (caseId) { sql += ' AND caseId = ?'; params.push(caseId); }
+    
+    sql += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
+    params.push(Number(pageSize), (Number(page) - 1) * Number(pageSize));
+    
+    const list = query(sql, params);
+    res.json({ code: 200, data: { list, total: list.length, page: Number(page), pageSize: Number(pageSize) } });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
   }
 });
 
 router.get('/:id', (req, res) => {
   try {
-    const { id } = req.params;
-    const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(id) as any;
-    if (!doc) {
-      return res.status(404).json({ message: '文书不存在' });
-    }
-    res.json({
-      ...doc,
-      approvals: doc.approvals ? JSON.parse(doc.approvals) : [],
-      suggestedPoints: doc.suggestedPoints ? JSON.parse(doc.suggestedPoints) : null,
-    });
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
+    const doc = queryOne('SELECT * FROM documents WHERE id = ?', [req.params.id]);
+    if (!doc) return res.status(404).json({ code: 404, message: '文书不存在' });
+    res.json({ code: 200, data: doc });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
   }
 });
 
 router.post('/', (req, res) => {
   try {
-    const id = crypto.randomUUID();
-    const {
-      caseId, caseNumber, type, title, content,
-      authorId, authorName, suggestedPoints,
-    } = req.body;
-
-    const createdAt = dayjs().format('YYYY-MM-DD HH:mm:ss');
-
-    db.prepare(`
-      INSERT INTO documents (id, caseId, caseNumber, type, title, content, status,
-        approverLevel, approvals, authorId, authorName, createdAt, suggestedPoints)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id, caseId, caseNumber, type, title, content, 'draft',
-      0, '[]', authorId, authorName, createdAt,
-      suggestedPoints ? JSON.stringify(suggestedPoints) : null
-    );
-
-    const newDoc = db.prepare('SELECT * FROM documents WHERE id = ?').get(id) as any;
-    res.status(201).json({
-      ...newDoc,
-      approvals: newDoc.approvals ? JSON.parse(newDoc.approvals) : [],
-      suggestedPoints: newDoc.suggestedPoints ? JSON.parse(newDoc.suggestedPoints) : null,
-    });
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-router.put('/:id', (req, res) => {
-  try {
-    const { id } = req.params;
-    const fields = ['title', 'content', 'type', 'status', 'suggestedPoints'];
-    const updates: string[] = [];
-    const params: any[] = [];
-
-    fields.forEach(field => {
-      if (req.body[field] !== undefined) {
-        if ((field === 'suggestedPoints') && Array.isArray(req.body[field])) {
-          updates.push(`${field} = ?`);
-          params.push(JSON.stringify(req.body[field]));
-        } else {
-          updates.push(`${field} = ?`);
-          params.push(req.body[field]);
-        }
-      }
-    });
-
-    if (updates.length > 0) {
-      params.push(id);
-      db.prepare(`UPDATE documents SET ${updates.join(', ')} WHERE id = ?`).run(...params);
-    }
-
-    const updatedDoc = db.prepare('SELECT * FROM documents WHERE id = ?').get(id) as any;
-    res.json({
-      ...updatedDoc,
-      approvals: updatedDoc.approvals ? JSON.parse(updatedDoc.approvals) : [],
-      suggestedPoints: updatedDoc.suggestedPoints ? JSON.parse(updatedDoc.suggestedPoints) : null,
-    });
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
+    const { caseId, caseNumber, type, title, content, authorId, authorName } = req.body;
+    const id = String(Date.now());
+    const createdAt = new Date().toISOString().split('T')[0];
+    
+    execute('INSERT INTO documents (id, caseId, caseNumber, type, title, content, status, approverLevel, approvals, authorId, authorName, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
+      [id, caseId, caseNumber, type, title, content, 'draft', 0, '[]', authorId, authorName, createdAt]);
+    
+    res.json({ code: 200, message: '创建成功', data: { id } });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
   }
 });
 
 router.post('/:id/submit', (req, res) => {
   try {
-    const { id } = req.params;
-    const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(id) as any;
-    if (!doc) {
-      return res.status(404).json({ message: '文书不存在' });
-    }
+    const { approverId, approverName } = req.body;
+    execute('UPDATE documents SET status = ?, approverLevel = ?, currentApproverId = ?, currentApproverName = ?, submittedAt = ? WHERE id = ?', 
+      ['pending', 1, approverId, approverName, new Date().toISOString().split('T')[0], req.params.id]);
+    res.json({ code: 200, message: '提交审批成功' });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
+  }
+});
 
-    const nextLevel = doc.approverLevel + 1;
-    let newStatus = 'pending_chief';
-    let approverRole = 'chief';
-    if (nextLevel === 2) {
-      newStatus = 'pending_president';
-      approverRole = 'president';
-    }
-
-    const approver = db.prepare('SELECT * FROM users WHERE role = ? LIMIT 1').get(approverRole) as any;
+router.post('/:id/approve', (req, res) => {
+  try {
+    const { approverId, approverName, comment, level } = req.body;
+    const doc = queryOne('SELECT * FROM documents WHERE id = ?', [req.params.id]);
+    if (!doc) return res.status(404).json({ code: 404, message: '文书不存在' });
     
-    const approvals = doc.approvals ? JSON.parse(doc.approvals) : [];
-    approvals.push({
-      id: crypto.randomUUID(),
-      level: nextLevel,
-      approverId: approver?.id,
-      approverName: approver?.name,
-      status: 'pending',
-      createdAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-    });
-
-    db.prepare(`
-      UPDATE documents 
-      SET status = ?, approverLevel = ?, currentApproverId = ?, currentApproverName = ?, 
-          approvals = ?, submittedAt = ?
-      WHERE id = ?
-    `).run(
-      newStatus, nextLevel, approver?.id, approver?.name,
-      JSON.stringify(approvals), dayjs().format('YYYY-MM-DD HH:mm:ss'), id
-    );
-
-    const updatedDoc = db.prepare('SELECT * FROM documents WHERE id = ?').get(id) as any;
-    res.json({
-      ...updatedDoc,
-      approvals: updatedDoc.approvals ? JSON.parse(updatedDoc.approvals) : [],
-    });
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
+    const approvals = JSON.parse(doc.approvals || '[]');
+    approvals.push({ id: approverId, name: approverName, time: new Date().toISOString(), comment });
+    
+    const isFinal = level >= 3;
+    const newStatus = isFinal ? 'approved' : 'pending';
+    
+    execute('UPDATE documents SET status = ?, approverLevel = ?, approvals = ?, approvedAt = ? WHERE id = ?', 
+      [newStatus, level, JSON.stringify(approvals), isFinal ? new Date().toISOString().split('T')[0] : null, req.params.id]);
+    
+    res.json({ code: 200, message: '审批成功' });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
   }
 });
 
 router.post('/generate', (req, res) => {
   try {
-    const { caseId, type, caseData } = req.body;
-    
-    const templates: Record<string, (data: any) => string> = {
-      judgment: (data) => `
-原告${data.plaintiff}与被告${data.defendant}${data.causeOfAction}一案，本院于${data.createdAt}立案后，依法适用普通程序，公开开庭进行了审理。本案现已审理终结。
-
-原告${data.plaintiff}向本院提出诉讼请求：1. 判令被告承担相应法律责任；2. 本案诉讼费用由被告承担。
-
-事实和理由：（此处为AI根据案件事实自动生成的事实认定部分）
-
-本院认为，依照《中华人民共和国民法典》相关规定，判决如下：
-
-一、（判决主文）
-
-二、（判决主文）
-
-如不服本判决，可在判决书送达之日起十五日内，向本院递交上诉状，并按对方当事人的人数提出副本，上诉于北京市第一中级人民法院。
-      `,
-      ruling: (data) => `
-原告${data.plaintiff}与被告${data.defendant}${data.causeOfAction}一案，本院依法进行了审理。
-
-经审查，本院认为，依照《中华人民共和国民事诉讼法》相关规定，裁定如下：
-
-（裁定主文）
-
-如不服本裁定，可在裁定书送达之日起十日内，向本院递交上诉状，上诉于北京市第一中级人民法院。
-      `,
-      mediation: (data) => `
-本案在审理过程中，经本院主持调解，双方当事人自愿达成如下协议：
-
-一、（协议内容）
-
-二、（协议内容）
-
-上述协议，不违反法律规定，本院予以确认。
-
-本调解书经双方当事人签收后，即具有法律效力。
-      `,
+    const { caseId, caseNumber, type, caseData } = req.body;
+    const templates = {
+      verdict: `${caseNumber}\n民事判决书\n\n原告：${caseData?.plaintiff || '原告'}\n被告：${caseData?.defendant || '被告'}\n\n...（判决书正文）...`,
+      indictment: `${caseNumber}\n民事起诉状\n\n原告：${caseData?.plaintiff || '原告'}\n被告：${caseData?.defendant || '被告'}\n\n诉讼请求：...`,
+      notice: `${caseNumber}\n开庭传票\n\n被传唤人：${caseData?.defendant || '被告'}\n案由：${caseData?.causeOfAction || '纠纷'}\n\n应到时间：...`,
+      ruling: `${caseNumber}\n民事裁定书\n\n...（裁定书正文）...`
     };
-
-    const content = templates[type]?.(caseData) || templates.judgment(caseData);
-    const suggestedPoints = [
-      '1. 案件事实认定清晰，证据链完整',
-      '2. 法律适用准确，裁判尺度统一',
-      '3. 文书结构规范，说理充分',
-    ];
-
-    res.json({
-      content: content.trim(),
-      suggestedPoints,
-    });
-  } catch (error: any) {
-    res.status(500).json({ message: error.message });
+    
+    const content = templates[type] || templates.verdict;
+    const suggestedPoints = ['事实认定清晰', '法律适用准确', '程序合法正当'];
+    
+    res.json({ code: 200, data: { content, suggestedPoints } });
+  } catch (err) {
+    res.status(500).json({ code: 500, message: err.message });
   }
 });
 
-export default router;
+module.exports = router;
